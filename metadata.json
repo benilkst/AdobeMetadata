@@ -1,0 +1,6 @@
+{
+  "name": "Adobe Stock AI Metadata Assistant",
+  "description": "AI-powered metadata optimization for stock creators, generating structured visual analysis, titles, descriptions, prioritized keywords, and compliance checks.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
