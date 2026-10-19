@@ -149,3 +149,82 @@ export async function processAssetFile(file: File): Promise<AssetInput> {
     });
   }
 }
+
+/**
+ * Downscales and optimizes high-resolution or heavy images (like 12MB PNGs)
+ * before sending to Gemini API. This drastically reduces token count, speeds up
+ * network transfer, and prevents RESOURCE_EXHAUSTED / 429 rate limit errors.
+ */
+export async function getOptimizedImageBase64(
+  file: File,
+  maxDimension = 1536,
+  quality = 0.85
+): Promise<{ base64: string; mimeType: string }> {
+  return new Promise((resolve) => {
+    if (typeof document === 'undefined' || !file.type.startsWith('image/')) {
+      fileToBase64(file)
+        .then((b64) => {
+          const clean = b64.replace(/^data:[^;]+;base64,/, '');
+          resolve({ base64: clean, mimeType: file.type || 'image/jpeg' });
+        })
+        .catch(() => {
+          resolve({ base64: '', mimeType: 'image/jpeg' });
+        });
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      let { width, height } = img;
+
+      // Downscale if either dimension exceeds maxDimension
+      if (width > maxDimension || height > maxDimension) {
+        if (width > height) {
+          height = Math.round((height * maxDimension) / width);
+          width = maxDimension;
+        } else {
+          width = Math.round((width * maxDimension) / height);
+          height = maxDimension;
+        }
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        fileToBase64(file).then((b64) => {
+          const clean = b64.replace(/^data:[^;]+;base64,/, '');
+          resolve({ base64: clean, mimeType: file.type || 'image/jpeg' });
+        });
+        return;
+      }
+
+      // Draw white background for transparent PNGs
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(0, 0, width, height);
+      ctx.drawImage(img, 0, 0, width, height);
+
+      // Convert to high-quality compressed JPEG (vastly smaller payload, perfect for vision AI)
+      const dataUrl = canvas.toDataURL('image/jpeg', quality);
+      const cleanBase64 = dataUrl.replace(/^data:[^;]+;base64,/, '');
+      resolve({ base64: cleanBase64, mimeType: 'image/jpeg' });
+    };
+
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      fileToBase64(file)
+        .then((b64) => {
+          const clean = b64.replace(/^data:[^;]+;base64,/, '');
+          resolve({ base64: clean, mimeType: file.type || 'image/jpeg' });
+        })
+        .catch(() => {
+          resolve({ base64: '', mimeType: 'image/jpeg' });
+        });
+    };
+
+    img.src = objectUrl;
+  });
+}

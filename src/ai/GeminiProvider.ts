@@ -4,7 +4,7 @@ import { AssetInput, VisualAnalysis, StockMetadata, ValidationResult, ExtensionS
 import { VISUAL_ANALYSIS_SYSTEM_INSTRUCTION, VISUAL_ANALYSIS_USER_PROMPT } from './prompts/visualAnalysisPrompt';
 import { METADATA_GENERATION_SYSTEM_INSTRUCTION, ADOBE_STOCK_CATEGORIES } from './prompts/metadataPrompt';
 import { calculateQualityScore } from '../compliance/qualityScorer';
-import { fileToBase64 } from '../utils/fileHelpers';
+import { fileToBase64, getOptimizedImageBase64 } from '../utils/fileHelpers';
 import { buildMetadataFromAnalysis } from '../metadata/metadataGenerator';
 import { analyzeVideoAsset } from '../analysis/videoAnalyzer';
 
@@ -102,48 +102,89 @@ export class GeminiProvider implements AIProvider {
     }
 
     const ai = new GoogleGenAI({ apiKey });
-    const fullBase64 = asset.base64 || (await fileToBase64(asset.file));
-    const cleanBase64 = fullBase64.replace(/^data:[^;]+;base64,/, '');
 
-    const modelName = settings.geminiModel || 'gemini-3.8-flash';
-
-    try {
-      const response = await callWithRetry(async () => {
-        return await ai.models.generateContent({
-          model: modelName,
-          contents: [
-            {
-              inlineData: {
-                data: cleanBase64,
-                mimeType: asset.type || 'image/jpeg',
-              },
-            },
-            VISUAL_ANALYSIS_USER_PROMPT,
-          ],
-          config: {
-            systemInstruction: VISUAL_ANALYSIS_SYSTEM_INSTRUCTION,
-            responseMimeType: 'application/json',
-          },
-        });
-      }, 2, 1200);
-
-      const text = response.text?.trim() || '{}';
-      const parsed = JSON.parse(text);
-      return this.sanitizeVisualAnalysis(parsed);
-    } catch (err: any) {
-      console.error('Gemini visual analysis error:', err);
-      const rawMsg = err?.message || (typeof err === 'object' ? JSON.stringify(err) : String(err));
-      if (rawMsg.includes('API_KEY_INVALID') || rawMsg.includes('403') || rawMsg.includes('API key not valid')) {
-        throw new Error('Invalid Gemini API Key. Google AI Studio keys usually begin with "AIzaSy...".');
+    // Client-side downscaling and compression: 12MB+ images become ~250KB JPEG
+    // Drastically lowers token usage from ~30k to ~258 tokens, avoiding 429 TPM limits
+    let cleanBase64 = '';
+    let mimeType = asset.type || 'image/jpeg';
+    if (asset.file) {
+      try {
+        const optimized = await getOptimizedImageBase64(asset.file, 1536, 0.85);
+        cleanBase64 = optimized.base64;
+        mimeType = optimized.mimeType;
+      } catch (optErr) {
+        console.warn('Image optimization fallback:', optErr);
       }
-      if (rawMsg.includes('500') || rawMsg.includes('Network error')) {
-        throw new Error('Gemini API network error (500). The AI service may be temporarily unavailable or rejecting this key.');
-      }
-      if (rawMsg.includes('RESOURCE_EXHAUSTED') || rawMsg.includes('429')) {
-        throw new Error('Gemini API quota rate limit reached. Please wait a moment before retrying.');
-      }
-      throw new Error(`Visual analysis error: ${rawMsg}`);
     }
+    if (!cleanBase64) {
+      const fullBase64 = asset.base64 || (await fileToBase64(asset.file));
+      cleanBase64 = fullBase64.replace(/^data:[^;]+;base64,/, '');
+    }
+
+    const preferredModel = settings.geminiModel || 'gemini-3.8-flash';
+    // List candidate models so if pro model or selected model hits quota (429), it immediately falls back to high-quota flash models
+    const candidateModels = [
+      preferredModel,
+      ...(preferredModel !== 'gemini-3.8-flash' ? ['gemini-3.8-flash'] : []),
+      'gemini-flash-latest',
+    ];
+
+    let lastError: any = null;
+
+    for (const modelToTry of candidateModels) {
+      try {
+        const response = await callWithRetry(async () => {
+          return await ai.models.generateContent({
+            model: modelToTry,
+            contents: [
+              {
+                inlineData: {
+                  data: cleanBase64,
+                  mimeType,
+                },
+              },
+              VISUAL_ANALYSIS_USER_PROMPT,
+            ],
+            config: {
+              systemInstruction: VISUAL_ANALYSIS_SYSTEM_INSTRUCTION,
+              responseMimeType: 'application/json',
+            },
+          });
+        }, 1, 1500);
+
+        const text = response.text?.trim() || '{}';
+        const parsed = JSON.parse(text);
+        return this.sanitizeVisualAnalysis(parsed);
+      } catch (err: any) {
+        lastError = err;
+        const rawMsg = err?.message || (typeof err === 'object' ? JSON.stringify(err) : String(err));
+        const isQuotaOrServer =
+          rawMsg.includes('RESOURCE_EXHAUSTED') ||
+          rawMsg.includes('429') ||
+          rawMsg.includes('500') ||
+          rawMsg.includes('503') ||
+          rawMsg.includes('overloaded');
+
+        if (isQuotaOrServer && modelToTry !== candidateModels[candidateModels.length - 1]) {
+          console.warn(`Model "${modelToTry}" hit quota limit, auto-retrying with fallback model...`);
+          continue;
+        }
+        break;
+      }
+    }
+
+    console.error('Gemini visual analysis error:', lastError);
+    const rawMsg = lastError?.message || (typeof lastError === 'object' ? JSON.stringify(lastError) : String(lastError));
+    if (rawMsg.includes('API_KEY_INVALID') || rawMsg.includes('403') || rawMsg.includes('API key not valid')) {
+      throw new Error('Invalid Gemini API Key. Google AI Studio keys usually begin with "AIzaSy...".');
+    }
+    if (rawMsg.includes('500') || rawMsg.includes('Network error')) {
+      throw new Error('Gemini API network error (500). The AI service may be temporarily unavailable or rejecting this key.');
+    }
+    if (rawMsg.includes('RESOURCE_EXHAUSTED') || rawMsg.includes('429')) {
+      throw new Error('Gemini API quota rate limit reached. Please wait a moment before retrying.');
+    }
+    throw new Error(`Visual analysis error: ${rawMsg}`);
   }
 
   async analyzeVideo(asset: AssetInput, settings: ExtensionSettings): Promise<VisualAnalysis> {

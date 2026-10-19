@@ -221,9 +221,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
               onChange={(e) => setModel(e.target.value)}
               className="w-full bg-neutral-850 border border-neutral-750 rounded-lg px-3 py-2 text-neutral-200 focus:outline-none focus:border-blue-500 text-xs cursor-pointer"
             >
-              <option value="gemini-3.8-flash">gemini-3.8-flash (Recommended: Fast & Accurate)</option>
-              <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview (Deep Multimodal Reasoning)</option>
-              <option value="gemini-flash-latest">gemini-flash-latest</option>
+              <option value="gemini-3.8-flash">gemini-3.8-flash (Recommended: High Quota & Fast)</option>
+              <option value="gemini-flash-latest">gemini-flash-latest (Reliable Quota)</option>
+              <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview (Strict Quota / May Hit Rate Limits)</option>
               <option value="custom">Custom Model ID...</option>
             </select>
             {model === 'custom' && (
